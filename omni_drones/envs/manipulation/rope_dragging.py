@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2023 Botian Xu, Tsinghua University
+# Copyright (c) 2025 Joris and Alejandro, KTH 
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -24,7 +24,7 @@
 import torch
 import torch.distributions as D
 from torch.func import vmap
-from omni.isaac.core.objects import DynamicCuboid
+from omni.isaac.core.objects import DynamicCuboid, DynamicCylinder
 from tensordict.tensordict import TensorDict, TensorDictBase
 from torchrl.data import CompositeSpec, UnboundedContinuousTensorSpec, DiscreteTensorSpec
 
@@ -36,14 +36,13 @@ from omni_drones.views import RigidPrimView
 from omni_drones.utils.torch import cpos, off_diag, others, quat_axis, euler_to_quaternion
 from omni_drones.robots.drone import MultirotorBase
 
-from .utils import TransportationGroup, TransportationCfg
+from .utils import ManipulationGroup, ManipulationCfg
 
 
-class TransportHover(IsaacEnv):
+class RopeDragging(IsaacEnv):
     r"""
-    A cooperative control task where a group of UAVs carry a box-shaped payload connected via
-    rigid links. The goal for the agents is to make the payload hover at a reference pose
-    (position and attitude).
+    A cooperative control task where two quadcopters are connected by a rope and,
+    via interaction between the rope and an object, move the object to the goal location
 
     ## Observation
 
@@ -74,8 +73,8 @@ class TransportHover(IsaacEnv):
 
     | Parameter       | Type               | Default       | Description                                                                                                                       |
     | --------------- | ------------------ | ------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-    | `drone_model`   | str                | "hummingbird" |                                                                                                                                   |
-    | `num_drones`    | int                | 4             |                                                                                                                                   |
+    | `drone_model`   | str                | "crazyflie"   |                                                                                                                                   |
+    | `num_drones`    | int                | 2             |                                                                                                                                   |
     | `safe_distance` | float              | 0.5           | A threshold value that gives penalty when the minimum separation between the UAVs is too small.                                   |
     | `mass_scale`    | List[float, float] | [0.5, 0.8]    | A tuple of two values that specifies the range of the payload mass to sample from in each episode (as ratio to the drone's mass). |
     """
@@ -107,19 +106,23 @@ class TransportHover(IsaacEnv):
         self.init_drone_poses = self.drone.get_world_poses(clone=True)
         self.init_drone_vels = torch.zeros_like(self.drone.get_velocities())
 
+        # Bounds for the payload rotation
         self.payload_target_rpy_dist = D.Uniform(
             torch.tensor([0., 0., 0.], device=self.device) * torch.pi,
-            torch.tensor([0., 0., 2.], device=self.device) * torch.pi
+            torch.tensor([0., 0., 0.], device=self.device) * torch.pi
         )
+        # Bounds for the payload mass
         payload_mass_scale = self.cfg.task.payload_mass_scale
         self.payload_mass_dist = D.Uniform(
             torch.as_tensor(payload_mass_scale[0] * self.drone.MASS_0.sum(), device=self.device),
             torch.as_tensor(payload_mass_scale[1] * self.drone.MASS_0.sum(), device=self.device)
         )
+        # Bounds for the initial position of the drones
         self.init_pos_dist = D.Uniform(
             torch.tensor([-3, -3, 1.], device=self.device),
             torch.tensor([3., 3., 2.5], device=self.device)
         )
+        # Bounds for the initial rotation of the drones
         self.init_rpy_dist = D.Uniform(
             torch.tensor([0., 0., 0.], device=self.device) * torch.pi,
             torch.tensor([0., 0., 2.], device=self.device) * torch.pi
@@ -136,18 +139,24 @@ class TransportHover(IsaacEnv):
             drone_model_cfg.name, drone_model_cfg.controller
         )
 
-        group_cfg = TransportationCfg(num_drones=self.cfg.task.num_drones)
-        self.group = TransportationGroup(drone=self.drone, cfg=group_cfg)
+        group_cfg = ManipulationCfg(num_drones=self.cfg.task.num_drones)
+        self.group = ManipulationGroup(drone=self.drone, cfg=group_cfg)
 
         scene_utils.design_scene()
 
-        DynamicCuboid(
+        DynamicCylinder(
             "/World/envs/env_0/payloadTargetVis",
-            translation=torch.tensor([0., 0., 2.]),
-            scale=torch.tensor([0.75, 0.5, 0.2]),
-            color=torch.tensor([0.8, 0.1, 0.1]),
-            size=2.01,
+            translation=torch.tensor([0., 0., 0.]),
+            scale=torch.tensor([0.1, 0.1, 0.02]),
+            color=torch.tensor([0.1, 0.8, 0.1])
         )
+        # DynamicCuboid(
+        #     "/World/envs/env_0/payloadTargetVis",
+        #     translation=torch.tensor([0., 0., 2.]),
+        #     scale=torch.tensor([0.75, 0.5, 0.2]),
+        #     color=torch.tensor([0.8, 0.1, 0.1]),
+        #     size=2.01,
+        # )
         kit_utils.set_collision_properties(
             "/World/envs/env_0/payloadTargetVis",
             collision_enabled=False
@@ -157,7 +166,7 @@ class TransportHover(IsaacEnv):
             disable_gravity=True
         )
 
-        self.group.spawn(translations=[(0, 0, 2.0)], enable_collision=False)
+        self.group.spawn(translations=[(0, 0, 0.5)], enable_collision=False)
         return ["/World/defaultGroundPlane"]
 
     def _set_specs(self):
@@ -167,28 +176,31 @@ class TransportHover(IsaacEnv):
             self.time_encoding_dim = 4
             payload_state_dim += self.time_encoding_dim
 
+        # Define the observation space
         observation_spec = CompositeSpec({
             "obs_self": UnboundedContinuousTensorSpec((1, drone_state_dim)),
             "obs_others": UnboundedContinuousTensorSpec((self.drone.n-1, 13+1)),
             "obs_payload": UnboundedContinuousTensorSpec((1, payload_state_dim)),
         }).to(self.device)
-
         observation_central_spec = CompositeSpec({
             "state_drones": UnboundedContinuousTensorSpec((self.drone.n, drone_state_dim)),
             "state_payload": UnboundedContinuousTensorSpec((1, payload_state_dim)),
         }).to(self.device)
-
         self.observation_spec = CompositeSpec({
             "agents": {
                 "observation": observation_spec.expand(self.drone.n),
                 "observation_central": observation_central_spec,
             }
         }).expand(self.num_envs).to(self.device)
+
+        # Define the action space
         self.action_spec = CompositeSpec({
             "agents": {
                 "action": torch.stack([self.drone.action_spec] * self.drone.n, dim=0),
             }
         }).expand(self.num_envs).to(self.device)
+
+        # Define the reward spec
         self.reward_spec = CompositeSpec({
             "agents": {
                 "reward": UnboundedContinuousTensorSpec((self.drone.n, 1))
@@ -218,9 +230,9 @@ class TransportHover(IsaacEnv):
         rpy = self.init_rpy_dist.sample(env_ids.shape)
         rot = euler_to_quaternion(rpy)
         heading = quat_axis(rot, 0)
+        # pos = torch.tensor([[0.0, 0.0, 2.0]], device='cuda')
 
-        print(f"pos: {pos}, pos.shape: {pos.shape}")
-
+        #? Drone stuff?
         self.group._reset_idx(env_ids)
         self.group.set_world_poses(pos + self.envs_positions[env_ids], rot, env_ids)
         self.group.set_velocities(self.init_velocities[env_ids], env_ids)
@@ -228,6 +240,7 @@ class TransportHover(IsaacEnv):
         self.group.set_joint_positions(self.init_joint_pos[env_ids], env_ids)
         self.group.set_joint_velocities(self.init_joint_vel[env_ids], env_ids)
 
+        # Payload stuff
         payload_target_rpy = self.payload_target_rpy_dist.sample(env_ids.shape)
         payload_target_rot = euler_to_quaternion(payload_target_rpy)
         payload_target_heading = quat_axis(payload_target_rot, 0)
@@ -237,6 +250,8 @@ class TransportHover(IsaacEnv):
 
         self.payload.set_masses(payload_masses, env_ids)
         self.payload_target_visual.set_world_poses(
+            # We can change the target position here
+            positions=torch.tensor([[0., 0., 0.]],device='cuda').reshape(-1,3),
             orientations=payload_target_rot,
             env_indices=env_ids
         )

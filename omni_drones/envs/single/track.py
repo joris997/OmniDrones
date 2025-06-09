@@ -152,6 +152,8 @@ class Track(IsaacEnv):
         self.draw = _debug_draw.acquire_debug_draw_interface()
 
     def _design_scene(self):
+        print(f"drone model: {self.cfg.task.drone_model}")
+        print(f"task: {self.cfg.task}")
         drone_model_cfg = self.cfg.task.drone_model
         self.drone, self.controller = MultirotorBase.make(
             drone_model_cfg.name, drone_model_cfg.controller

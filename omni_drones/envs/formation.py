@@ -199,6 +199,7 @@ class Formation(IsaacEnv):
         pos = vmap(sample_from_grid, randomness="different")(
             self.cells.expand(len(env_ids), *self.cells.shape), n=self.drone.n
         ) + self.envs_positions[env_ids].unsqueeze(1)
+        print(f"pos: {pos}, pos.shape: {pos.shape}")
         rpy = self.init_rpy_dist.sample((*env_ids.shape, self.drone.n))
         rot = euler_to_quaternion(rpy)
         vel = torch.zeros(len(env_ids), self.drone.n, 6, device=self.device)

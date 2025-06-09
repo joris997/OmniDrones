@@ -1,4 +1,4 @@
-headless: false
+headless: true
 
 max_iters: 10
 num_envs: 16
